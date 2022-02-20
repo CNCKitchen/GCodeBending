@@ -5,93 +5,91 @@ Created on Wed Jan 12 10:10:14 2022
 @author: stefa
 """
 
+from dataclasses import dataclass
+from datetime import timedelta
+from time import perf_counter
+from typing import ClassVar
 from spline import Spline
 import numpy as np
-import math
-#from scipy.interpolate import CubicSpline
-#import matplotlib.pyplot as plt
 import re
-from collections import namedtuple
-
-Point2D = namedtuple('Point2D', 'x y')
-GCodeLine = namedtuple('GCodeLine', 'x y z e f')
 
 
-#################   USER INPUT PARAMETERS   #########################
+@dataclass
+class Point2D:
+    x: float
+    y: float
 
-INPUT_FILE_NAME = "pipe_mk2.gcode"
-OUTPUT_FILE_NAME = "BENT_" + INPUT_FILE_NAME 
-LAYER_HEIGHT = 0.3 #Layer height of the sliced gcode
-WARNING_ANGLE = 30 #Maximum Angle printable with your setup
- 
-#2-point spline
-SPLINE_X = [125, 95]
-SPLINE_Z = [0, 140]
-BEND_ANGLE = -30 # degrees, at the top point
+@dataclass
+class GCodeLine:
+    x: float
+    y: float
+    z: float
+    e: float
+    f: int
 
-#4-point spline example
-#SPLINE_X = [150, 156,144,150]
-#SPLINE_Z = [0,30,60,90]
+    gcode_format: ClassVar[re.Pattern] = (
+        re.compile('(?i)^[gG][0-3](?:\s'
+                   '+x(?P<x>-?[0-9.]{1,15})|\s'
+                   '+y(?P<y>-?[0-9.]{1,15})|\s'
+                   '+z(?P<z>-?[0-9.]{1,15})|\s'
+                   '+e(?P<e>-?[0-9.]{1,15})|\s'
+                   '+f(?P<f>-?[0-9.]{1,15}))*')
+    )
 
-DISCRETIZATION_LENGTH = 0.01 #discretization length for the spline length lookup table
-
-#################   USER INPUT PARAMETERS END  #########################
-
-spline = Spline(SPLINE_X, SPLINE_Z, DISCRETIZATION_LENGTH)
-spline.plot()
-
-
-def getNormalPoint(currentPoint: Point2D, derivative: float, distance: float) -> Point2D: #claculates the normal of a point on the spline
-    angle = np.arctan(derivative) + math.pi /2
-    return Point2D(currentPoint.x + distance * np.cos(angle), currentPoint.y + distance * np.sin(angle))
-
-def parseGCode(currentLine: str) -> GCodeLine: #parse a G-Code line
-    thisLine = re.compile('(?i)^[gG][0-3](?:\s+x(?P<x>-?[0-9.]{1,15})|\s+y(?P<y>-?[0-9.]{1,15})|\s+z(?P<z>-?[0-9.]{1,15})|\s+e(?P<e>-?[0-9.]{1,15})|\s+f(?P<f>-?[0-9.]{1,15}))*')
-    lineEntries = thisLine.match(currentLine)
-    if lineEntries:
-        return GCodeLine(lineEntries.group('x'), lineEntries.group('y'), lineEntries.group('z'), lineEntries.group('e'), lineEntries.group('f'))
-
-def writeLine(G, X, Y, Z, F = None, E = None): #write a line to the output file
-    outputSting = "G" + str(int(G)) + " X" + str(round(X,5)) + " Y" + str(round(Y,5)) + " Z" + str(round(Z,3))
-    if E is not None:
-        outputSting = outputSting + " E" + str(round(float(E),5))
-    if F is not None:
-        outputSting = outputSting + " F" + str(int(float(F)))
-    outputFile.write(outputSting + "\n")
+    @classmethod
+    def from_gcode(cls, line: str):
+        line_entries = cls.gcode_format.match(line)
+        if line_entries:
+            return cls(*line_entries.groups())
 
 
-lastPosition = Point2D(0, 0)
-currentZ = 0.0
-lastZ = 0.0
-currentLayer = 0
-relativeMode = False
+def main(in_file, out_file, spline, layer_height, warning_angle,
+         xy_precision=4, z_precision=3, e_precision=5):
 
-with open(INPUT_FILE_NAME, "r") as gcodeFile, open(OUTPUT_FILE_NAME, "w+") as outputFile:
-        for currentLine in gcodeFile:
+    lastPosition = Point2D(0, 0)
+    currentZ = 0.0
+    lastZ = 0.0
+    currentLayer = 0
+    relativeMode = False
+
+    with open(in_file, "r") as gcodeFile, open(out_file, "w+") as outputFile:
+        def writeLine(G, X, Y, Z, E=None, F=None):
+            output = f'G{G} X{X:.{xy_precision}f} Y{Y:.{xy_precision}f} Z{Z:.{z_precision}f}'
+            if E is not None:
+                output += f" E{E:.{e_precision}f}"
+            if F is not None:
+                output += f" F{F}"
+            outputFile.write(output + '\n')
+
+        print('Processing: (press CTRL+C to abort)')
+        start = perf_counter()
+        for index, currentLine in enumerate(gcodeFile):
+            if index % 1000 == 0: # track progress
+                print(f"[{timedelta(seconds=perf_counter()-start)}]: line {index}\r", end='')
             if currentLine[0] == ";":   #if NOT a comment
                 outputFile.write(currentLine)
                 continue
-            if currentLine.find("G91 ") != -1:   #filter relative commands
+            if currentLine.startswith("G91"):    #filter relative commands
                 relativeMode = True
                 outputFile.write(currentLine)
                 continue
-            if currentLine.find("G90 ") != -1:   #set absolute mode
+            if currentLine.startswith("G90 "):   #set absolute mode
                 relativeMode = False
                 outputFile.write(currentLine)
                 continue
             if relativeMode: #if in relative mode don't do anything
                 outputFile.write(currentLine)
                 continue
-            currentLineCommands = parseGCode(currentLine)
+            currentLineCommands = GCodeLine.from_gcode(currentLine)
             if currentLineCommands is not None: #if current comannd is a valid gcode
                 if currentLineCommands.z is not None: #if there is a z height in the command
                     currentZ = float(currentLineCommands.z)
-                    
+                
                 if currentLineCommands.x is None or currentLineCommands.y is None: #if command does not contain x and y movement it#s probably not a print move
                     if currentLineCommands.z is not None: #if there is only z movement (e.g. z-hop)
-                        outputFile.write("G91\nG1 Z" + str(currentZ-lastZ))
+                        outputFile.write(f"G91\nG1 Z{currentZ - lastZ}")
                         if currentLineCommands.f is not None:
-                            outputFile.write(" F" + str(currentLineCommands.f))
+                            outputFile.write(f" F{currentLineCommands.f}")
                         outputFile.write("\nG90\n")
                         lastZ = currentZ
                         continue
@@ -100,47 +98,89 @@ with open(INPUT_FILE_NAME, "r") as gcodeFile, open(OUTPUT_FILE_NAME, "w+") as ou
                 currentPosition = Point2D(float(currentLineCommands.x), float(currentLineCommands.y))
                 midpointX = lastPosition.x + (currentPosition.x - lastPosition.x) / 2  #look for midpoint
                 
-                distToSpline = midpointX - SPLINE_X[0]
+                distToSpline = midpointX - spline.X[0]
                 
                 #Correct the z-height if the spline gets followed
-                correctedZHeight = spline.projected_length(currentZ)#onSplineLength(currentZ)
+                correctedZHeight = spline.projected_length(currentZ)
 
                 angleSplineThisLayer = spline.inclination_angle(correctedZHeight)
-                #angleSplineThisLayer = np.arctan(SPLINE(correctedZHeight, 1)) #inclination angle this layer
-                angleLastLayer = spline.inclination_angle(correctedZHeight - LAYER_HEIGHT)
-                #angleLastLayer = np.arctan(SPLINE(correctedZHeight - LAYER_HEIGHT, 1)) # inclination angle previous layer
-                
+                angleLastLayer = spline.inclination_angle(correctedZHeight - layer_height)
                 heightDifference = np.sin(angleSplineThisLayer - angleLastLayer) * distToSpline * -1 # layer height difference
-                
-                transformedGCode = getNormalPoint(Point2D(correctedZHeight, spline.x_at(correctedZHeight)), spline.x_at(correctedZHeight, 1), currentPosition.x - SPLINE_X[0])
-                
+                transformedGCode = Point2D(*spline.normal_point(currentPosition.x, correctedZHeight))
+
                 #Check if a move is below Z = 0
                 if float(transformedGCode.x) <= 0.0: 
                     print("Warning! Movement below build platform. Check your spline!")
                 
                 #Detect unplausible moves
                 if transformedGCode.x < 0 or np.abs(transformedGCode.x - currentZ) > 50:
-                    print("Warning! Possibly unplausible move detected on height " + str(currentZ) + " mm!")
+                    print(f"Warning! Possibly unplausible move detected on height {currentZ} mm!")
                     outputFile.write(currentLine)
-                    continue    
+                    continue
                 #Check for self intersection
-                if (LAYER_HEIGHT + heightDifference) < 0:
-                    print("ERROR! Self intersection on height " + str(currentZ) + " mm! Check your spline!")
+                if (layer_height + heightDifference) < 0:
+                    print(f"ERROR! Self intersection on height {currentZ} mm! Check your spline!")
                     
                 #Check the angle of the printed layer and warn if it's above the machine limit
-                if angleSplineThisLayer > (WARNING_ANGLE * np.pi / 180.):
-                    print("Warning! Spline angle is", (angleSplineThisLayer * 180. / np.pi), "at height  ", str(currentZ), " mm! Check your spline!")
+                if angleSplineThisLayer > np.radians(warning_angle):
+                    print(f"Warning! Spline angle is {np.degrees(angleSplineThisLayer)}, at height  {currentZ} mm! Check your spline!")
                                                     
                 if currentLineCommands.e is not None: #if this is a line with extrusion
                     """if float(currentLineCommands.e) < 0.0:
                         print("Retraction")"""
-                    extrusionAmount = float(currentLineCommands.e) * ((LAYER_HEIGHT + heightDifference)/LAYER_HEIGHT)
-                    #outputFile.write(";was" + currentLineCommands.e + " is" + str(extrusionAmount) + " diff" + str(int(((LAYER_HEIGHT + heightDifference)/LAYER_HEIGHT)*100)) + "\n")
+                    extrusionAmount = float(currentLineCommands.e) * ((layer_height + heightDifference)/layer_height)
+                    #outputFile.write(";was" + currentLineCommands.e + " is" + str(extrusionAmount) + " diff" + str(int(((layer_height + heightDifference)/layer_height)*100)) + "\n")
                 else:
-                    extrusionAmount = None                    
-                writeLine(1,transformedGCode.y, currentPosition.y, transformedGCode.x, None, extrusionAmount)
+                    extrusionAmount = None
+                writeLine(1,transformedGCode.y, currentPosition.y, transformedGCode.x, extrusionAmount, None)
                 lastPosition = currentPosition
                 lastZ = currentZ
             else:
                 outputFile.write(currentLine)
-print("GCode bending finished!")
+
+    print("\nGCode bending finished!")
+    print(f"Processed {index} lines in {timedelta(seconds=perf_counter()-start)}")
+
+if __name__ == "__main__":
+    from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+
+    parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
+    parser.add_argument("in_file", help="input file name (*.gcode)")
+    parser.add_argument("-o", "--out_file", help="output filename, default 'BENT_{in_file}'")
+    parser.add_argument("-x", "--x_values", default=(125, 95), nargs="*", type=float,
+                        help=("x values that define the spline, space-separated (e.g. '125 50 33')."
+                              " First should be in the center of your part."))
+    parser.add_argument("-z", "--z_values", default=(0, 140), nargs="*", type=float,
+                        help=("corresponding z values that define the spline, space-separated."
+                              " First should be 0 (e.g. '0 80 140')."))
+    parser.add_argument("-l", "--layer_height", default=0.3, type=float,
+                        help="layer height of the sliced gcode [mm].")
+    parser.add_argument("-a", "--warning_angle", default=30, type=float,
+                        help="Maximum angle [degrees] printable with your setup")
+    parser.add_argument("-b", "--bend_angle", default=-30, type=float,
+                        help="Angle [degrees] of the spline at the top point")
+    parser.add_argument("-d", "--discretization_length", default=0.01, type=float,
+                        help="Discretization length for the spline length lookup table")
+    parser.add_argument("-s", "--skip_plot", action="store_true",
+                        help="flag to skip plotting of the spline")
+    parser.add_argument("--xy_precision", type=int, default=4,
+                        help="Decimals of precision to round x/y values to.")
+    parser.add_argument("--z_precision", type=int, default=3,
+                        help="Decimals of precision to round z (height) values to.")
+    parser.add_argument("--e_precision", type=int, default=5,
+                        help="Decimals of precision to round extrusion amounts to.")
+    parser.add_argument("--printer_dims", nargs=2, default=(200, 200), type=float,
+                        help="printer width and height [mm], space-separated.")
+
+    args = parser.parse_args()
+
+    spline = Spline(args.x_values, args.z_values, args.discretization_length,
+                    args.bend_angle)
+    if not args.skip_plot:
+        print("Press Q to close the plot and continue")
+        spline.plot(printer_dims=args.printer_dims)
+
+    out_file = args.out_file or f"BENT_{args.in_file}"
+
+    main(args.in_file, out_file, spline, args.layer_height, args.warning_angle,
+         args.xy_precision, args.z_precision, args.e_precision)
