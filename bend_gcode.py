@@ -5,10 +5,11 @@ Created on Wed Jan 12 10:10:14 2022
 @author: stefa
 """
 
+from spline import Spline
 import numpy as np
 import math
-from scipy.interpolate import CubicSpline
-import matplotlib.pyplot as plt
+#from scipy.interpolate import CubicSpline
+#import matplotlib.pyplot as plt
 import re
 from collections import namedtuple
 
@@ -26,33 +27,18 @@ WARNING_ANGLE = 30 #Maximum Angle printable with your setup
 #2-point spline
 SPLINE_X = [125, 95]
 SPLINE_Z = [0, 140]
+BEND_ANGLE = -30 # degrees, at the top point
 
 #4-point spline example
 #SPLINE_X = [150, 156,144,150]
 #SPLINE_Z = [0,30,60,90]
 
-
-SPLINE = CubicSpline(SPLINE_Z, SPLINE_X, bc_type=((1, 0), (1, -np.pi/6))) #define spline with BC-conditions
-#SPLINE = CubicSpline(SPLINE_Z, SPLINE_X, bc_type=((1, 0), (1, -0.5235988))) #bent 30°
-
 DISCRETIZATION_LENGTH = 0.01 #discretization length for the spline length lookup table
 
 #################   USER INPUT PARAMETERS END  #########################
 
-
-SplineLookupTable = [0.0]
-
-nx = np.arange(0,SPLINE_Z[-1],1)
-
-xs = np.arange(0,SPLINE_Z[-1],1)
-fig, ax = plt.subplots(figsize=(6.5, 4))
-ax.plot(SPLINE_X, SPLINE_Z, 'o', label='data')
-ax.plot(SPLINE(xs), xs, label="S")
-ax.set_xlim(0, 200)
-ax.set_ylim(0, 200)
-plt.gca().set_aspect('equal', adjustable='box')
-# ax.legend(loc='lower left', ncol=2)
-plt.show()
+spline = Spline(SPLINE_X, SPLINE_Z, DISCRETIZATION_LENGTH)
+spline.plot()
 
 
 def getNormalPoint(currentPoint: Point2D, derivative: float, distance: float) -> Point2D: #claculates the normal of a point on the spline
@@ -73,40 +59,12 @@ def writeLine(G, X, Y, Z, F = None, E = None): #write a line to the output file
         outputSting = outputSting + " F" + str(int(float(F)))
     outputFile.write(outputSting + "\n")
 
-"""
-# legacy - toooo slow!    
-def onSplineLength(Zheight) -> float: #calculates a new z height if the spline is followed
-    return Zheight #for debugging
-    discretizationLength = 0.01 #Steps taken to find the spline height
-    currentHeight = 0.00
-    currentLength = 0.00
-    while currentLength < Zheight:
-        currentLength += np.sqrt((SPLINE(currentHeight)-SPLINE(currentHeight+discretizationLength))**2 + discretizationLength**2)
-        currentHeight += discretizationLength
-    return currentHeight
-"""
-
-def onSplineLength(Zheight) -> float: #calculates a new z height if the spline is followed
-    for i in range(len(SplineLookupTable)):
-        height = SplineLookupTable[i]
-        if height >= Zheight:
-            return i * DISCRETIZATION_LENGTH
-    print("Error! Spline not defined high enough!")
-
-def createSplineLookupTable():
-    heightSteps = np.arange(DISCRETIZATION_LENGTH, SPLINE_Z[-1], DISCRETIZATION_LENGTH)
-    for i in range(len(heightSteps)):
-        height = heightSteps[i]
-        SplineLookupTable.append(SplineLookupTable[i] + np.sqrt((SPLINE(height)-SPLINE(height-DISCRETIZATION_LENGTH))**2 + DISCRETIZATION_LENGTH**2))
-    
-
 
 lastPosition = Point2D(0, 0)
 currentZ = 0.0
 lastZ = 0.0
 currentLayer = 0
 relativeMode = False
-createSplineLookupTable()
 
 with open(INPUT_FILE_NAME, "r") as gcodeFile, open(OUTPUT_FILE_NAME, "w+") as outputFile:
         for currentLine in gcodeFile:
@@ -145,15 +103,16 @@ with open(INPUT_FILE_NAME, "r") as gcodeFile, open(OUTPUT_FILE_NAME, "w+") as ou
                 distToSpline = midpointX - SPLINE_X[0]
                 
                 #Correct the z-height if the spline gets followed
-                correctedZHeight = onSplineLength(currentZ)
-                                
-                angleSplineThisLayer = np.arctan(SPLINE(correctedZHeight, 1)) #inclination angle this layer
-                
-                angleLastLayer = np.arctan(SPLINE(correctedZHeight - LAYER_HEIGHT, 1)) # inclination angle previous layer
+                correctedZHeight = spline.projected_length(currentZ)#onSplineLength(currentZ)
+
+                angleSplineThisLayer = spline.inclination_angle(correctedZHeight)
+                #angleSplineThisLayer = np.arctan(SPLINE(correctedZHeight, 1)) #inclination angle this layer
+                angleLastLayer = spline.inclination_angle(correctedZHeight - LAYER_HEIGHT)
+                #angleLastLayer = np.arctan(SPLINE(correctedZHeight - LAYER_HEIGHT, 1)) # inclination angle previous layer
                 
                 heightDifference = np.sin(angleSplineThisLayer - angleLastLayer) * distToSpline * -1 # layer height difference
                 
-                transformedGCode = getNormalPoint(Point2D(correctedZHeight, SPLINE(correctedZHeight)), SPLINE(correctedZHeight, 1), currentPosition.x - SPLINE_X[0])
+                transformedGCode = getNormalPoint(Point2D(correctedZHeight, spline.x_at(correctedZHeight)), spline.x_at(correctedZHeight, 1), currentPosition.x - SPLINE_X[0])
                 
                 #Check if a move is below Z = 0
                 if float(transformedGCode.x) <= 0.0: 
